@@ -41,7 +41,7 @@ func TestIrisCLIIserviceDefine(t *testing.T) {
 
 	serviceName := "testService"
 
-	serviceQuery := tests.ExecuteT(t, fmt.Sprintf("iriscli iservice definition --name=%s --def-chain-id=%s %v", serviceName, chainID, flags), "")
+	serviceQuery := tests.ExecuteT(t, fmt.Sprintf("iriscli iservice definition --service-name=%s --def-chain-id=%s %v", serviceName, chainID, flags), "")
 	require.Equal(t, "", serviceQuery)
 
 	fooAcc := executeGetAccount(t, fmt.Sprintf("iriscli bank account %s %v", fooAddr, flags))
@@ -55,11 +55,11 @@ func TestIrisCLIIserviceDefine(t *testing.T) {
 	ioutil.WriteFile(fileName, []byte(idlContent), 0644)
 	sdStr := fmt.Sprintf("iriscli iservice define %v", flags)
 	sdStr += fmt.Sprintf(" --from=%s", "foo")
-	sdStr += fmt.Sprintf(" --name=%s", serviceName)
+	sdStr += fmt.Sprintf(" --service-name=%s", serviceName)
 	sdStr += fmt.Sprintf(" --service-description=%s", "test")
 	sdStr += fmt.Sprintf(" --tags=%s", "tag1 tag2")
 	sdStr += fmt.Sprintf(" --author-description=%s", "foo")
-	sdStr += fmt.Sprintf(" --broadcast=%s", "Broadcast")
+	sdStr += fmt.Sprintf(" --messaging=%s", "Multicast")
 	sdStr += fmt.Sprintf(" --file=%s", fileName)
 	sdStr += fmt.Sprintf(" --fee=%s", "0.004iris")
 
@@ -74,7 +74,7 @@ func TestIrisCLIIserviceDefine(t *testing.T) {
 		t.Error("Test Failed: (99, 100) expected, recieved: {}", num)
 	}
 
-	serviceDef := executeGetServiceDefinition(t, fmt.Sprintf("iriscli iservice definition --name=%s --def-chain-id=%s %v", serviceName, chainID, flags))
+	serviceDef := executeGetServiceDefinition(t, fmt.Sprintf("iriscli iservice definition --service-name=%s --def-chain-id=%s %v", serviceName, chainID, flags))
 	require.Equal(t, serviceName, serviceDef.Name)
 
 	// method test
