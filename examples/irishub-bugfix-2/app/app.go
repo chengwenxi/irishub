@@ -134,7 +134,7 @@ func NewIrisApp(logger log.Logger, db dbm.DB, traceStore io.Writer, baseAppOptio
 	app.upgradeKeeper = upgrade.NewKeeper(app.cdc, app.keyUpgrade, app.stakeKeeper)
 	app.govKeeper = gov.NewKeeper(app.cdc, app.keyGov, app.coinKeeper, app.stakeKeeper, app.RegisterCodespace(gov.DefaultCodespace))
 	app.recordKeeper = record.NewKeeper(app.cdc, app.keyRecord, app.RegisterCodespace(record.DefaultCodespace))
-	app.iserviceKeeper = iservice.NewKeeper(app.cdc, app.keyIservice, app.RegisterCodespace(iservice.DefaultCodespace))
+	app.iserviceKeeper = iservice.NewKeeper(app.cdc, app.keyIservice, app.coinKeeper, app.RegisterCodespace(iservice.DefaultCodespace))
 
 	// register message routes
 	// need to update each module's msg type
