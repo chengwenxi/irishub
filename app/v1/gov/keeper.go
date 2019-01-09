@@ -390,7 +390,7 @@ func (keeper Keeper) AddVote(ctx sdk.Context, proposalID uint64, voterAddr sdk.A
 	}
 
 	vote := Vote{
-		VoteTime:   time.Now(),
+		VoteTime:   ctx.BlockHeader().Time,
 		ProposalID: proposalID,
 		Voter:      voterAddr,
 		Option:     option,
