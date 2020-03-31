@@ -6,7 +6,7 @@
 # Network type: testnet, mainnet
 export NetworkType="testnet"
 
-# Disable invariant checking: "no"
+# Disable invariant chcecking: "no"
 # Panic on invariant failure: "panic"
 # Print error message on invariant failure: "error"
 export InvariantLevel="panic"

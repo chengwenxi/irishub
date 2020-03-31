@@ -1,187 +1,390 @@
 package app
 
 import (
-	"bufio"
-	"encoding/json"
-	"fmt"
 	"io"
 	"os"
-	"strings"
 
-	"github.com/irisnet/irishub/app/protocol"
-	v0 "github.com/irisnet/irishub/app/v0"
-	v1 "github.com/irisnet/irishub/app/v1"
-	v2 "github.com/irisnet/irishub/app/v2"
-	"github.com/irisnet/irishub/codec"
-	"github.com/irisnet/irishub/modules/auth"
-	"github.com/irisnet/irishub/store"
-	sdk "github.com/irisnet/irishub/types"
-	"github.com/spf13/viper"
 	abci "github.com/tendermint/tendermint/abci/types"
-	cfg "github.com/tendermint/tendermint/config"
-	cmn "github.com/tendermint/tendermint/libs/common"
 	"github.com/tendermint/tendermint/libs/log"
-	tmtypes "github.com/tendermint/tendermint/types"
+	tmos "github.com/tendermint/tendermint/libs/os"
 	dbm "github.com/tendermint/tm-db"
+
+	bam "github.com/cosmos/cosmos-sdk/baseapp"
+	"github.com/cosmos/cosmos-sdk/codec"
+	"github.com/cosmos/cosmos-sdk/simapp"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/types/module"
+	"github.com/cosmos/cosmos-sdk/version"
+	"github.com/cosmos/cosmos-sdk/x/auth"
+	authvesting "github.com/cosmos/cosmos-sdk/x/auth/vesting"
+	"github.com/cosmos/cosmos-sdk/x/bank"
+	"github.com/cosmos/cosmos-sdk/x/crisis"
+	distr "github.com/cosmos/cosmos-sdk/x/distribution"
+	"github.com/cosmos/cosmos-sdk/x/evidence"
+	"github.com/cosmos/cosmos-sdk/x/genutil"
+	"github.com/cosmos/cosmos-sdk/x/gov"
+	"github.com/cosmos/cosmos-sdk/x/params"
+	paramsclient "github.com/cosmos/cosmos-sdk/x/params/client"
+	"github.com/cosmos/cosmos-sdk/x/slashing"
+	"github.com/cosmos/cosmos-sdk/x/staking"
+	"github.com/cosmos/cosmos-sdk/x/supply"
+
+	"github.com/irisnet/irishub/modules/asset"
+	token "github.com/irisnet/irishub/modules/asset/01-token"
+	"github.com/irisnet/irishub/modules/coinswap"
+	"github.com/irisnet/irishub/modules/guardian"
+	"github.com/irisnet/irishub/modules/htlc"
+	"github.com/irisnet/irishub/modules/mint"
+	"github.com/irisnet/irishub/modules/rand"
+	"github.com/irisnet/irishub/modules/service"
 )
 
-const (
-	appName                = "IrisApp"
-	appPrometheusNamespace = "iris"
-	// FlagReplay used for replaying last block
-	FlagReplay = "replay-last-block"
-	// Multistore saves a snapshot every 10000 blocks
-	DefaultSyncableHeight = store.NumStoreEvery
-	// Multistore saves last 100 blocks
-	DefaultCacheSize = store.NumRecent
-)
+const appName = "IrisApp"
 
-// default home directories for expected binaries
 var (
-	DefaultLCDHome  = os.ExpandEnv("$HOME/.irislcd")
-	DefaultCLIHome  = os.ExpandEnv("$HOME/.iriscli")
+	// default home directories for iriscli
+	DefaultCLIHome = os.ExpandEnv("$HOME/.iriscli")
+
+	// default home directories for iris
 	DefaultNodeHome = os.ExpandEnv("$HOME/.iris")
+
+	// The module BasicManager is in charge of setting up basic,
+	// non-dependant module elements, such as codec registration
+	// and genesis verification.
+	ModuleBasics = module.NewBasicManager(
+		genutil.AppModuleBasic{},
+		auth.AppModuleBasic{},
+		bank.AppModuleBasic{},
+		staking.AppModuleBasic{},
+		mint.AppModuleBasic{},
+		distr.AppModuleBasic{},
+		gov.NewAppModuleBasic(paramsclient.ProposalHandler, distr.ProposalHandler),
+		params.AppModuleBasic{},
+		crisis.AppModuleBasic{},
+		slashing.AppModuleBasic{},
+		supply.AppModuleBasic{},
+		asset.AppModuleBasic{},
+		guardian.AppModuleBasic{},
+		htlc.AppModuleBasic{},
+		coinswap.AppModuleBasic{},
+		rand.AppModuleBasic{},
+		service.AppModuleBasic{},
+	)
+
+	// module account permissions
+	maccPerms = map[string][]string{
+		auth.FeeCollectorName:     nil,
+		distr.ModuleName:          nil,
+		mint.ModuleName:           {supply.Minter},
+		staking.BondedPoolName:    {supply.Burner, supply.Staking},
+		staking.NotBondedPoolName: {supply.Burner, supply.Staking},
+		gov.ModuleName:            {supply.Burner},
+		token.SubModuleName:       {supply.Minter, supply.Burner},
+		htlc.ModuleName:           nil,
+		coinswap.ModuleName:       {supply.Minter, supply.Burner},
+		service.DepositAccName:    {supply.Burner},
+		service.RequestAccName:    nil,
+		service.TaxAccName:        nil,
+	}
 )
 
-//IrisApp Extended ABCI application
+// MakeCodec creates the application codec. The codec is sealed before it is
+// returned.
+func MakeCodec() *codec.Codec {
+	var cdc = codec.New()
+
+	ModuleBasics.RegisterCodec(cdc)
+	sdk.RegisterCodec(cdc)
+	codec.RegisterCrypto(cdc)
+	codec.RegisterEvidences(cdc)
+	authvesting.RegisterCodec(cdc)
+
+	return cdc.Seal()
+}
+
+// Verify app interface at compile time
+var _ simapp.App = (*IrisApp)(nil)
+
+// IrisApp extended ABCI application
 type IrisApp struct {
-	*BaseApp
+	*bam.BaseApp
+	cdc *codec.Codec
+
+	invCheckPeriod uint
+
+	// keys to access the substores
+	keys  map[string]*sdk.KVStoreKey
+	tKeys map[string]*sdk.TransientStoreKey
+
+	// keepers
+	accountKeeper  auth.AccountKeeper
+	bankKeeper     bank.Keeper
+	supplyKeeper   supply.Keeper
+	stakingKeeper  staking.Keeper
+	slashingKeeper slashing.Keeper
+	mintKeeper     mint.Keeper
+	distrKeeper    distr.Keeper
+	govKeeper      gov.Keeper
+	crisisKeeper   crisis.Keeper
+	paramsKeeper   params.Keeper
+	evidenceKeeper *evidence.Keeper
+	assetKeeper    asset.Keeper
+	guardianKeeper guardian.Keeper
+	htlcKeeper     htlc.Keeper
+	coinswapKeeper coinswap.Keeper
+	randKeeper     rand.Keeper
+	serviceKeeper  service.Keeper
+
+	// the module manager
+	mm *module.Manager
+
+	// simulation manager
+	sm *module.SimulationManager
 }
 
-// NewIrisApp generates an iris application
-func NewIrisApp(logger log.Logger, db dbm.DB, config *cfg.InstrumentationConfig, traceStore io.Writer, baseAppOptions ...func(*BaseApp)) *IrisApp {
-	bApp := NewBaseApp(appName, logger, db, baseAppOptions...)
+// NewIrisApp returns a reference to an initialized IrisApp.
+func NewIrisApp(logger log.Logger, db dbm.DB, traceStore io.Writer, loadLatest bool,
+	invCheckPeriod uint, baseAppOptions ...func(*bam.BaseApp)) *IrisApp {
+
+	cdc := MakeCodec()
+
+	bApp := bam.NewBaseApp(appName, logger, db, auth.DefaultTxDecoder(cdc), baseAppOptions...)
 	bApp.SetCommitMultiStoreTracer(traceStore)
+	bApp.SetAppVersion(version.Version)
 
-	// create your application object
-	var app = &IrisApp{BaseApp: bApp}
+	keys := sdk.NewKVStoreKeys(
+		bam.MainStoreKey, auth.StoreKey, staking.StoreKey, supply.StoreKey,
+		mint.StoreKey, distr.StoreKey, slashing.StoreKey, gov.StoreKey,
+		params.StoreKey, evidence.StoreKey, asset.StoreKey, guardian.StoreKey,
+		htlc.StoreKey, coinswap.StoreKey, rand.StoreKey, service.StoreKey,
+	)
+	tKeys := sdk.NewTransientStoreKeys(staking.TStoreKey, params.TStoreKey)
 
-	protocolKeeper := sdk.NewProtocolKeeper(protocol.KeyMain)
-	engine := protocol.NewProtocolEngine(protocolKeeper)
-	app.SetProtocolEngine(&engine)
-	app.MountStoresIAVL(engine.GetKVStoreKeys())
-	app.MountStoresTransient(engine.GetTransientStoreKeys())
-
-	var err error
-	if viper.GetBool(FlagReplay) {
-		lastHeight := Replay(app.Logger)
-		err = app.LoadVersion(lastHeight, protocol.KeyMain, true)
-	} else {
-		err = app.LoadLatestVersion(protocol.KeyMain)
-	} // app is now sealed
-	if err != nil {
-		cmn.Exit(err.Error())
-	}
-	//Duplicate prometheus config
-	appPrometheusConfig := *config
-	//Change namespace to appName
-	appPrometheusConfig.Namespace = appPrometheusNamespace
-	engine.Add(v0.NewProtocolV0(0, logger, protocolKeeper, app.checkInvariant, app.trackCoinFlow, &appPrometheusConfig))
-	engine.Add(v1.NewProtocolV1(1, logger, protocolKeeper, app.checkInvariant, app.trackCoinFlow, &appPrometheusConfig))
-	engine.Add(v2.NewProtocolV2(2, logger, protocolKeeper, app.checkInvariant, app.trackCoinFlow, &appPrometheusConfig))
-	// engine.Add(v1.NewProtocolV1(1, ...))
-	// engine.Add(v2.NewProtocolV1(2, ...))
-
-	loaded, current := engine.LoadCurrentProtocol(app.GetKVStore(protocol.KeyMain))
-	if !loaded {
-		cmn.Exit(fmt.Sprintf("Your software doesn't support the required protocol (version %d)!", current))
-	}
-	app.BaseApp.txDecoder = auth.DefaultTxDecoder(engine.GetCurrentProtocol().GetCodec())
-	engine.GetCurrentProtocol().InitMetrics(app.cms)
-	return app
-}
-
-// MakeLatestCodec loads the lastest verson codec
-func MakeLatestCodec() *codec.Codec {
-	var cdc = v2.MakeCodec() // replace with latest protocol version
-	return cdc
-}
-
-// LastBlockHeight returns the last blcok height
-func (app *IrisApp) LastBlockHeight() int64 {
-	return app.BaseApp.LastBlockHeight()
-}
-
-// ResetOrReplay returns whether you need to reset or replay
-func (app *IrisApp) ResetOrReplay(replayHeight int64) (replay bool, height int64) {
-	lastBlockHeight := app.BaseApp.LastBlockHeight()
-	if replayHeight > lastBlockHeight {
-		replayHeight = lastBlockHeight
+	app := &IrisApp{
+		BaseApp:        bApp,
+		cdc:            cdc,
+		invCheckPeriod: invCheckPeriod,
+		keys:           keys,
+		tKeys:          tKeys,
 	}
 
-	app.Logger.Info("This Reset operation will change the application store, backup your node home directory before proceeding!!!")
-	app.Logger.Info(fmt.Sprintf("The last block height is %v, will reset height to %v.", lastBlockHeight, replayHeight))
+	// init params keeper and subspaces
+	app.paramsKeeper = params.NewKeeper(app.cdc, keys[params.StoreKey], tKeys[params.TStoreKey])
+	authSubspace := app.paramsKeeper.Subspace(auth.DefaultParamspace)
+	bankSubspace := app.paramsKeeper.Subspace(bank.DefaultParamspace)
+	stakingSubspace := app.paramsKeeper.Subspace(staking.DefaultParamspace)
+	mintSubspace := app.paramsKeeper.Subspace(mint.DefaultParamspace)
+	distrSubspace := app.paramsKeeper.Subspace(distr.DefaultParamspace)
+	slashingSubspace := app.paramsKeeper.Subspace(slashing.DefaultParamspace)
+	govSubspace := app.paramsKeeper.Subspace(gov.DefaultParamspace).WithKeyTable(gov.ParamKeyTable())
+	crisisSubspace := app.paramsKeeper.Subspace(crisis.DefaultParamspace)
+	evidenceSubspace := app.paramsKeeper.Subspace(evidence.DefaultParamspace)
+	assetSubspace := app.paramsKeeper.Subspace(asset.DefaultParamspace)
+	coinswapSubspace := app.paramsKeeper.Subspace(coinswap.DefaultParamspace)
+	serviceSubspace := app.paramsKeeper.Subspace(service.DefaultParamspace)
 
-	app.Logger.Info("Are you sure to proceed? (y/n)")
-	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil {
-		cmn.Exit(err.Error())
-	}
-	confirm := strings.ToLower(strings.TrimSpace(input))
-	if confirm != "y" && confirm != "yes" {
-		cmn.Exit("Reset operation aborted.")
-	}
+	// add keepers
+	app.accountKeeper = auth.NewAccountKeeper(app.cdc, keys[auth.StoreKey], authSubspace, auth.ProtoBaseAccount)
+	app.bankKeeper = bank.NewBaseKeeper(app.accountKeeper, bankSubspace, app.ModuleAccountAddrs())
+	app.supplyKeeper = supply.NewKeeper(app.cdc, keys[supply.StoreKey], app.accountKeeper, app.bankKeeper, maccPerms)
+	stakingKeeper := staking.NewKeeper(
+		app.cdc, keys[staking.StoreKey], app.supplyKeeper, stakingSubspace,
+	)
+	app.mintKeeper = mint.NewKeeper(app.cdc, keys[mint.StoreKey], mintSubspace, app.supplyKeeper, auth.FeeCollectorName)
+	app.distrKeeper = distr.NewKeeper(app.cdc, keys[distr.StoreKey], distrSubspace, &stakingKeeper,
+		app.supplyKeeper, auth.FeeCollectorName, app.ModuleAccountAddrs())
+	app.slashingKeeper = slashing.NewKeeper(
+		app.cdc, keys[slashing.StoreKey], &stakingKeeper, slashingSubspace,
+	)
+	app.crisisKeeper = crisis.NewKeeper(crisisSubspace, invCheckPeriod, app.supplyKeeper, auth.FeeCollectorName)
 
-	if lastBlockHeight-replayHeight <= DefaultCacheSize {
-		err := app.LoadVersion(replayHeight, protocol.KeyMain, true)
+	// create evidence keeper with evidence router
+	app.evidenceKeeper = evidence.NewKeeper(
+		app.cdc, keys[evidence.StoreKey], evidenceSubspace, stakingKeeper, app.slashingKeeper,
+	)
+	evidenceRouter := evidence.NewRouter()
+	// TODO: Register evidence routes.
+	app.evidenceKeeper.SetRouter(evidenceRouter)
 
-		if err != nil {
-			if strings.Contains(err.Error(), fmt.Sprintf("wanted to load target %v but only found up to", replayHeight)) {
-				app.Logger.Info(fmt.Sprintf("Can not find the target version %d, trying to load an earlier version and replay blocks", replayHeight))
-			} else {
-				cmn.Exit(err.Error())
-			}
-		} else {
-			app.Logger.Info(fmt.Sprintf("The last block height is %d, loaded store at %d", lastBlockHeight, replayHeight))
-			return false, replayHeight
+	// create guardian keeper with guardian router
+	app.guardianKeeper = guardian.NewKeeper(app.cdc, keys[guardian.StoreKey])
+
+	// register the proposal types
+	govRouter := gov.NewRouter()
+	govRouter.AddRoute(gov.RouterKey, gov.ProposalHandler).
+		AddRoute(params.RouterKey, params.NewParamChangeProposalHandler(app.paramsKeeper)).
+		AddRoute(distr.RouterKey, distr.NewCommunityPoolSpendProposalHandler(app.distrKeeper))
+	app.govKeeper = gov.NewKeeper(
+		app.cdc, keys[gov.StoreKey], govSubspace,
+		app.supplyKeeper, &stakingKeeper, govRouter,
+	)
+
+	// register the staking hooks
+	// NOTE: stakingKeeper above is passed by reference, so that it will contain these hooks
+	app.stakingKeeper = *stakingKeeper.SetHooks(
+		staking.NewMultiStakingHooks(app.distrKeeper.Hooks(), app.slashingKeeper.Hooks()),
+	)
+
+	app.assetKeeper = asset.NewKeeper(
+		app.cdc, keys[asset.StoreKey], assetSubspace,
+		app.supplyKeeper, auth.FeeCollectorName,
+	)
+
+	app.htlcKeeper = htlc.NewKeeper(app.cdc, keys[htlc.StoreKey], app.supplyKeeper)
+
+	app.coinswapKeeper = coinswap.NewKeeper(
+		app.cdc, keys[coinswap.StoreKey], app.bankKeeper, app.accountKeeper, app.supplyKeeper, coinswapSubspace,
+	)
+
+	app.randKeeper = rand.NewKeeper(app.cdc, keys[rand.StoreKey])
+
+	app.serviceKeeper = service.NewKeeper(
+		app.cdc, keys[service.StoreKey], app.supplyKeeper, app.guardianKeeper, serviceSubspace,
+	)
+
+	// NOTE: Any module instantiated in the module manager that is later modified
+	// must be passed by reference here.
+	app.mm = module.NewManager(
+		genutil.NewAppModule(app.accountKeeper, app.stakingKeeper, app.BaseApp.DeliverTx),
+		auth.NewAppModule(app.accountKeeper),
+		bank.NewAppModule(app.bankKeeper, app.accountKeeper),
+		crisis.NewAppModule(&app.crisisKeeper),
+		supply.NewAppModule(app.supplyKeeper, app.accountKeeper),
+		distr.NewAppModule(app.distrKeeper, app.accountKeeper, app.supplyKeeper, app.stakingKeeper),
+		gov.NewAppModule(app.govKeeper, app.accountKeeper, app.supplyKeeper),
+		mint.NewAppModule(app.mintKeeper),
+		slashing.NewAppModule(app.slashingKeeper, app.accountKeeper, app.stakingKeeper),
+		staking.NewAppModule(app.stakingKeeper, app.accountKeeper, app.supplyKeeper),
+		evidence.NewAppModule(*app.evidenceKeeper),
+		asset.NewAppModule(app.assetKeeper),
+		guardian.NewAppModule(app.guardianKeeper),
+		htlc.NewAppModule(app.htlcKeeper),
+		coinswap.NewAppModule(app.coinswapKeeper),
+		rand.NewAppModule(app.randKeeper),
+		service.NewAppModule(app.serviceKeeper),
+	)
+
+	// During begin block slashing happens after distr.BeginBlocker so that
+	// there is nothing left over in the validator fee pool, so as to keep the
+	// CanWithdrawInvariant invariant.
+	app.mm.SetOrderBeginBlockers(
+		mint.ModuleName,
+		distr.ModuleName,
+		slashing.ModuleName,
+		htlc.ModuleName,
+		rand.ModuleName,
+	)
+
+	app.mm.SetOrderEndBlockers(
+		crisis.ModuleName,
+		gov.ModuleName,
+		staking.ModuleName,
+		service.ModuleName,
+	)
+
+	// NOTE: The genutils module must occur after staking so that pools are
+	// properly initialized with tokens from genesis accounts.
+	app.mm.SetOrderInitGenesis(
+		distr.ModuleName, staking.ModuleName, auth.ModuleName, bank.ModuleName,
+		slashing.ModuleName, gov.ModuleName, mint.ModuleName,
+		asset.ModuleName, guardian.ModuleName, htlc.ModuleName,
+		coinswap.ModuleName, rand.ModuleName, service.ModuleName,
+		supply.ModuleName, crisis.ModuleName, genutil.ModuleName, evidence.ModuleName,
+	)
+
+	app.mm.RegisterInvariants(&app.crisisKeeper)
+	app.mm.RegisterRoutes(app.Router(), app.QueryRouter())
+
+	// create the simulation manager and define the order of the modules for deterministic simulations
+	//
+	// NOTE: This is not required for apps that don't use the simulator for fuzz testing
+	// transactions.
+	// TODO
+	//app.sm = module.NewSimulationManager(
+	//	auth.NewAppModule(app.accountKeeper),
+	//	bank.NewAppModule(app.bankKeeper, app.accountKeeper),
+	//	supply.NewAppModule(app.supplyKeeper, app.accountKeeper),
+	//	gov.NewAppModule(app.govKeeper, app.supplyKeeper),
+	//	mint.NewAppModule(app.mintKeeper),
+	//	distr.NewAppModule(app.distrKeeper, app.supplyKeeper),
+	//	staking.NewAppModule(app.stakingKeeper, app.accountKeeper, app.supplyKeeper),
+	//	slashing.NewAppModule(app.slashingKeeper, app.stakingKeeper),
+	//	asset.NewAppModule(app.assetKeeper),
+	//	htlc.NewAppModule(app.htlcKeeper),
+	//	coinswap.NewAppModule(app.coinswapKeeper),
+	//	rand.NewAppModule(app.randKeeper),
+	//	service.NewAppModule(app.serviceKeeper),
+	//)
+
+	//app.sm.RegisterStoreDecoders()
+
+	// initialize stores
+	app.MountKVStores(keys)
+	app.MountTransientStores(tKeys)
+
+	// initialize BaseApp
+	app.SetInitChainer(app.InitChainer)
+	app.SetBeginBlocker(app.BeginBlocker)
+	app.SetAnteHandler(NewAnteHandler(app.accountKeeper, app.supplyKeeper, app.assetKeeper, auth.DefaultSigVerificationGasConsumer))
+	app.SetEndBlocker(app.EndBlocker)
+
+	if loadLatest {
+		if err := app.LoadLatestVersion(app.keys[bam.MainStoreKey]); err != nil {
+			tmos.Exit(err.Error())
 		}
 	}
 
-	loadHeight := app.replayToHeight(replayHeight, app.Logger)
-	err = app.LoadVersion(loadHeight, protocol.KeyMain, true)
-	if err != nil {
-		cmn.Exit(err.Error())
-	}
-
-	// If reset to another protocol version, should reload Protocol and reset txDecoder
-	loaded, current := app.Engine.LoadCurrentProtocol(app.GetKVStore(protocol.KeyMain))
-	if !loaded {
-		cmn.Exit(fmt.Sprintf("Your software doesn't support the required protocol (version %d)!", current))
-	}
-	app.BaseApp.txDecoder = auth.DefaultTxDecoder(app.Engine.GetCurrentProtocol().GetCodec())
-
-	app.Logger.Info(fmt.Sprintf("The last block height is %d, want to load store at %d", lastBlockHeight, replayHeight))
-
-	// Version 1 does not need replay
-	if replayHeight == 1 {
-		app.Logger.Info(fmt.Sprintf("Loaded store at %d", loadHeight))
-		return false, replayHeight
-	}
-
-	app.Logger.Info(fmt.Sprintf("Loaded store at %d, start to replay to %d", loadHeight, replayHeight))
-	return true, replayHeight
-
+	return app
 }
 
-// ExportAppStateAndValidators exports the state of iris for a genesis file
-func (app *IrisApp) ExportAppStateAndValidators(forZeroHeight bool) (appState json.RawMessage, validators []tmtypes.GenesisValidator, err error) {
-	ctx := app.NewContext(true, abci.Header{Height: app.LastBlockHeight()})
-	return app.Engine.GetCurrentProtocol().ExportAppStateAndValidators(ctx, forZeroHeight)
+// application updates every begin block
+func (app *IrisApp) BeginBlocker(ctx sdk.Context, req abci.RequestBeginBlock) abci.ResponseBeginBlock {
+	return app.mm.BeginBlock(ctx, req)
 }
 
-// LoadHeight loads to the specified height
+// application updates every end block
+func (app *IrisApp) EndBlocker(ctx sdk.Context, req abci.RequestEndBlock) abci.ResponseEndBlock {
+	return app.mm.EndBlock(ctx, req)
+}
+
+// application update at chain initialization
+func (app *IrisApp) InitChainer(ctx sdk.Context, req abci.RequestInitChain) abci.ResponseInitChain {
+	var genesisState simapp.GenesisState
+	app.cdc.MustUnmarshalJSON(req.AppStateBytes, &genesisState)
+
+	return app.mm.InitGenesis(ctx, genesisState)
+}
+
+// load a particular height
 func (app *IrisApp) LoadHeight(height int64) error {
-	return app.LoadVersion(height, protocol.KeyMain, false)
+	return app.LoadVersion(height, app.keys[bam.MainStoreKey])
 }
 
-func (app *IrisApp) replayToHeight(replayHeight int64, logger log.Logger) int64 {
-	loadHeight := int64(0)
-	logger.Info("Please make sure the replay height is smaller than the latest block height.")
-	if replayHeight >= DefaultSyncableHeight {
-		loadHeight = replayHeight - replayHeight%DefaultSyncableHeight
-	} else {
-		// version 1 will always be kept
-		loadHeight = 1
+// ModuleAccountAddrs returns all the app's module account addresses.
+func (app *IrisApp) ModuleAccountAddrs() map[string]bool {
+	modAccAddrs := make(map[string]bool)
+	for acc := range maccPerms {
+		modAccAddrs[supply.NewModuleAddress(acc).String()] = true
 	}
-	return loadHeight
+
+	return modAccAddrs
+}
+
+// Codec returns the application's sealed codec.
+func (app *IrisApp) Codec() *codec.Codec {
+	return app.cdc
+}
+
+// SimulationManager implements the SimulationApp interface
+func (app *IrisApp) SimulationManager() *module.SimulationManager {
+	return app.sm
+}
+
+// GetMaccPerms returns a mapping of the application's module account permissions.
+func GetMaccPerms() map[string][]string {
+	modAccPerms := make(map[string][]string)
+	for k, v := range maccPerms {
+		modAccPerms[k] = v
+	}
+	return modAccPerms
 }
