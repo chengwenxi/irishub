@@ -89,9 +89,9 @@ import (
 	"github.com/irisnet/irismod/modules/oracle"
 	oraclekeeper "github.com/irisnet/irismod/modules/oracle/keeper"
 	oracletypes "github.com/irisnet/irismod/modules/oracle/types"
-	"github.com/irisnet/irismod/modules/random"
-	randomkeeper "github.com/irisnet/irismod/modules/random/keeper"
-	randomtypes "github.com/irisnet/irismod/modules/random/types"
+	//"github.com/irisnet/irismod/modules/random"
+	//randomkeeper "github.com/irisnet/irismod/modules/random/keeper"
+	//randomtypes "github.com/irisnet/irismod/modules/random/types"
 	"github.com/irisnet/irismod/modules/record"
 	recordkeeper "github.com/irisnet/irismod/modules/record/keeper"
 	recordtypes "github.com/irisnet/irismod/modules/record/types"
@@ -146,7 +146,7 @@ var (
 		coinswap.AppModuleBasic{},
 		service.AppModuleBasic{},
 		oracle.AppModuleBasic{},
-		random.AppModuleBasic{},
+		//random.AppModuleBasic{},
 	)
 
 	// module account permissions
@@ -230,7 +230,7 @@ type IrisApp struct {
 	coinswapKeeper coinswapkeeper.Keeper
 	serviceKeeper  servicekeeper.Keeper
 	oracleKeeper   oraclekeeper.Keeper
-	randomKeeper   randomkeeper.Keeper
+	//randomKeeper   randomkeeper.Keeper
 
 	// the module manager
 	mm *module.Manager
@@ -282,7 +282,8 @@ func NewIrisApp(
 		govtypes.StoreKey, paramstypes.StoreKey, ibchost.StoreKey, upgradetypes.StoreKey,
 		evidencetypes.StoreKey, ibctransfertypes.StoreKey, capabilitytypes.StoreKey,
 		guardiantypes.StoreKey, tokentypes.StoreKey, nfttypes.StoreKey, htlctypes.StoreKey, recordtypes.StoreKey,
-		coinswaptypes.StoreKey, servicetypes.StoreKey, oracletypes.StoreKey, randomtypes.StoreKey,
+		coinswaptypes.StoreKey, servicetypes.StoreKey, oracletypes.StoreKey,
+		//randomtypes.StoreKey,
 	)
 	tkeys := sdk.NewTransientStoreKeys(paramstypes.TStoreKey)
 	memKeys := sdk.NewMemoryStoreKeys(capabilitytypes.MemStoreKey)
@@ -410,7 +411,7 @@ func NewIrisApp(
 		app.serviceKeeper,
 	)
 
-	app.randomKeeper = randomkeeper.NewKeeper(appCodec, keys[randomtypes.StoreKey], app.bankKeeper, app.serviceKeeper)
+	//app.randomKeeper = randomkeeper.NewKeeper(appCodec, keys[randomtypes.StoreKey], app.bankKeeper, app.serviceKeeper)
 
 	// NOTE: Any module instantiated in the module manager that is later modified
 	// must be passed by reference here.
@@ -442,7 +443,7 @@ func NewIrisApp(
 		coinswap.NewAppModule(appCodec, app.coinswapKeeper, app.accountKeeper, app.bankKeeper),
 		service.NewAppModule(appCodec, app.serviceKeeper, app.accountKeeper, app.bankKeeper),
 		oracle.NewAppModule(appCodec, app.oracleKeeper),
-		random.NewAppModule(appCodec, app.randomKeeper, app.accountKeeper, app.bankKeeper),
+		//random.NewAppModule(appCodec, app.randomKeeper, app.accountKeeper, app.bankKeeper),
 	)
 
 	// During begin block slashing happens after distr.BeginBlocker so that
@@ -452,7 +453,8 @@ func NewIrisApp(
 	app.mm.SetOrderBeginBlockers(
 		upgradetypes.ModuleName, minttypes.ModuleName, distrtypes.ModuleName,
 		slashingtypes.ModuleName, evidencetypes.ModuleName, stakingtypes.ModuleName,
-		ibchost.ModuleName, htlctypes.ModuleName, randomtypes.ModuleName,
+		ibchost.ModuleName, htlctypes.ModuleName,
+		//randomtypes.ModuleName,
 	)
 	app.mm.SetOrderEndBlockers(
 		crisistypes.ModuleName, govtypes.ModuleName, stakingtypes.ModuleName,
@@ -469,7 +471,8 @@ func NewIrisApp(
 		slashingtypes.ModuleName, govtypes.ModuleName, minttypes.ModuleName, crisistypes.ModuleName,
 		ibchost.ModuleName, genutiltypes.ModuleName, evidencetypes.ModuleName, ibctransfertypes.ModuleName,
 		guardiantypes.ModuleName, tokentypes.ModuleName, nfttypes.ModuleName, htlctypes.ModuleName, recordtypes.ModuleName,
-		coinswaptypes.ModuleName, servicetypes.ModuleName, oracletypes.ModuleName, randomtypes.ModuleName,
+		coinswaptypes.ModuleName, servicetypes.ModuleName, oracletypes.ModuleName,
+		//randomtypes.ModuleName,
 	)
 
 	app.mm.RegisterInvariants(&app.crisisKeeper)
@@ -504,7 +507,7 @@ func NewIrisApp(
 		coinswap.NewAppModule(appCodec, app.coinswapKeeper, app.accountKeeper, app.bankKeeper),
 		service.NewAppModule(appCodec, app.serviceKeeper, app.accountKeeper, app.bankKeeper),
 		oracle.NewAppModule(appCodec, app.oracleKeeper),
-		random.NewAppModule(appCodec, app.randomKeeper, app.accountKeeper, app.bankKeeper),
+		//random.NewAppModule(appCodec, app.randomKeeper, app.accountKeeper, app.bankKeeper),
 	)
 
 	app.sm.RegisterStoreDecoders()
@@ -585,7 +588,7 @@ func (app *IrisApp) InitChainer(ctx sdk.Context, req abci.RequestInitChain) abci
 	app.appCodec.MustUnmarshalJSON(genesisState[servicetypes.ModuleName], &serviceGenState)
 	serviceGenState.Definitions = append(serviceGenState.Definitions, servicetypes.GenOraclePriceSvcDefinition())
 	serviceGenState.Bindings = append(serviceGenState.Bindings, servicetypes.GenOraclePriceSvcBinding(nativeToken.MinUnit))
-	serviceGenState.Definitions = append(serviceGenState.Definitions, randomtypes.GetSvcDefinition())
+	//serviceGenState.Definitions = append(serviceGenState.Definitions, randomtypes.GetSvcDefinition())
 	genesisState[servicetypes.ModuleName] = app.appCodec.MustMarshalJSON(&serviceGenState)
 
 	return app.mm.InitGenesis(ctx, app.appCodec, genesisState)
